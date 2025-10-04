@@ -1,0 +1,14 @@
+qr_detector:
+  ros__parameters:
+    input_image_topic: "/SampleDrone/FrontCamera/compressed"
+    output_image_topic: "/image_out/compressed"
+    text_topic: "/qr/text"
+    encode_format: "jpeg"
+    jpeg_quality: 90
+    rotate_attempts: [0, 90, 180, 270]
+    use_pyzbar_fallback: true
+    draw_box: true
+    draw_text: true
+    max_fps: 30
+    skip_rate: 1
+    qos_reliability: "best_effort"
