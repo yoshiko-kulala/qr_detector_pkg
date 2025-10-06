@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import csv
+import datetime
+import os
 import time
-from typing import List, Sequence, Tuple
+from typing import List, Sequence, Set, Tuple
 
 import cv2
 import numpy as np
@@ -37,6 +40,12 @@ class QRDetector(Node):
         self.declare_parameter('max_fps', 30)
         self.declare_parameter('skip_rate', 1)
         self.declare_parameter('qos_reliability', 'best_effort')
+        self.declare_parameter('log_enable', False)
+        self.declare_parameter('log_root_dir', '~/qr_logs')
+        self.declare_parameter('log_image_format', 'jpeg')
+        self.declare_parameter('log_jpeg_quality', 95)
+        self.declare_parameter('log_limit_per_frame', 1)
+        self.declare_parameter('log_filename_sanitize_replace', '_')
 
         input_topic = self.get_parameter('input_image_topic').value
         output_topic = self.get_parameter('output_image_topic').value
@@ -50,6 +59,22 @@ class QRDetector(Node):
         max_fps = float(self.get_parameter('max_fps').value)
         skip_rate = max(1, int(self.get_parameter('skip_rate').value))
         reliability_param = str(self.get_parameter('qos_reliability').value).lower()
+        self.log_enable = bool(self.get_parameter('log_enable').value)
+        log_root_dir = str(self.get_parameter('log_root_dir').value)
+        log_format_param = str(self.get_parameter('log_image_format').value).lower()
+        self.log_image_format = 'png' if log_format_param == 'png' else 'jpeg'
+        jpeg_quality_param = int(self.get_parameter('log_jpeg_quality').value)
+        self.log_jpeg_quality = max(0, min(100, jpeg_quality_param))
+        limit_param = int(self.get_parameter('log_limit_per_frame').value)
+        self.log_limit_per_frame = max(1, limit_param)
+        replacement = str(self.get_parameter('log_filename_sanitize_replace').value)
+        self.log_filename_sanitize_replace = replacement if replacement else '_'
+        self.session_dir: str | None = None
+        self.csv_path: str | None = None
+        self.seen_texts: Set[str] = set()
+        if self.log_enable:
+            if not self._setup_logging(log_root_dir):
+                self.log_enable = False
 
         self.encode_format = encode_format
         self.jpeg_quality = jpeg_quality
@@ -105,6 +130,9 @@ class QRDetector(Node):
 
             if self.draw_box or self.draw_text:
                 annotated = self._draw_annotations(annotated, polygons, texts, angle, image.shape[:2])
+
+        if self.log_enable and decoded_texts:
+            self._handle_logging(image, decoded_texts)
 
         if decoded_texts:
             text_msg = String()
@@ -237,6 +265,85 @@ class QRDetector(Node):
             'system_default': QoSReliabilityPolicy.SYSTEM_DEFAULT,
         }
         return mapping.get(value, QoSReliabilityPolicy.BEST_EFFORT)
+
+    def _setup_logging(self, root_dir_param: str) -> bool:
+        root_dir = os.path.expanduser(root_dir_param)
+        timestamp = datetime.datetime.now().strftime('%Y-%m-%d-%H-%M-%S')
+        session_dir = os.path.join(root_dir, timestamp)
+        try:
+            os.makedirs(session_dir, exist_ok=True)
+        except OSError as exc:
+            self.get_logger().error(f'Failed to create log directory {session_dir}: {exc}')
+            return False
+
+        csv_path = os.path.join(session_dir, 'qr-list.csv')
+        try:
+            with open(csv_path, 'w', newline='', encoding='utf-8') as csv_file:
+                writer = csv.writer(csv_file)
+                writer.writerow(['timestamp', 'text', 'filename'])
+        except OSError as exc:
+            self.get_logger().error(f'Failed to initialize log CSV {csv_path}: {exc}')
+            return False
+
+        self.session_dir = session_dir
+        self.csv_path = csv_path
+        return True
+
+    def _handle_logging(self, raw_image: np.ndarray, decoded_texts: Sequence[str]) -> None:
+        if not self.session_dir or not self.csv_path:
+            return
+
+        new_texts: List[str] = []
+        for text in decoded_texts:
+            if not text:
+                continue
+            if text in self.seen_texts:
+                continue
+            new_texts.append(text)
+
+        if not new_texts:
+            return
+
+        success, encoded, fmt = encode_image(raw_image, self.log_image_format, self.log_jpeg_quality)
+        if not success:
+            self.get_logger().warn('Failed to encode raw image for logging')
+            return
+
+        extension = '.png' if fmt == 'png' else '.jpeg'
+        limit = min(len(new_texts), self.log_limit_per_frame)
+        for text in new_texts[:limit]:
+            sanitized = self._sanitize_filename(text)
+            filename = sanitized + extension
+            file_path = os.path.join(self.session_dir, filename)
+            try:
+                with open(file_path, 'wb') as image_file:
+                    image_file.write(encoded.tobytes())
+            except OSError as exc:
+                self.get_logger().warn(f'Failed to write log image {file_path}: {exc}')
+                continue
+
+            timestamp = datetime.datetime.now(datetime.timezone.utc).astimezone().isoformat()
+            try:
+                with open(self.csv_path, 'a', newline='', encoding='utf-8') as csv_file:
+                    writer = csv.writer(csv_file)
+                    writer.writerow([timestamp, text, filename])
+            except OSError as exc:
+                self.get_logger().warn(f'Failed to append CSV log {self.csv_path}: {exc}')
+            else:
+                self.get_logger().info(f'Saved QR log: {text} -> {filename}')
+
+            self.seen_texts.add(text)
+
+    def _sanitize_filename(self, text: str) -> str:
+        replace = self.log_filename_sanitize_replace
+        invalid_chars = '\\/:*?"<>|\n\r\t'
+        sanitized = ''.join(
+            c if c not in invalid_chars and 31 < ord(c) < 127 else replace for c in text
+        )
+        sanitized = sanitized.strip().replace(' ', replace)
+        if not sanitized:
+            sanitized = f'QR_{int(time.time() * 1000)}'
+        return sanitized
 
 
 def main(args=None) -> None:  # pragma: no cover - ROS 2 entry point

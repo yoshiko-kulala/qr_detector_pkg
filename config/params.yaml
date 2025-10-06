@@ -12,3 +12,9 @@ qr_detector:
     max_fps: 30
     skip_rate: 1
     qos_reliability: "best_effort"
+    log_enable: false
+    log_root_dir: "~/qr_logs"
+    log_image_format: "jpeg"
+    log_jpeg_quality: 95
+    log_limit_per_frame: 1
+    log_filename_sanitize_replace: "_"
