@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import csv
 import datetime
+import math
 import os
 import time
-from typing import List, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import cv2
 import numpy as np
@@ -13,6 +14,7 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy
 from sensor_msgs.msg import CompressedImage
 from std_msgs.msg import String
+from nav_msgs.msg import Odometry
 
 from .utils import encode_image, flatten_points, map_points_to_original, rotate_image
 
@@ -46,6 +48,9 @@ class QRDetector(Node):
         self.declare_parameter('log_jpeg_quality', 95)
         self.declare_parameter('log_limit_per_frame', 1)
         self.declare_parameter('log_filename_sanitize_replace', '_')
+        self.declare_parameter('log_odom_enable', True)
+        self.declare_parameter('odom_topic', '/NITRone/odom')
+        self.declare_parameter('yaw_unit', 'deg')
 
         input_topic = self.get_parameter('input_image_topic').value
         output_topic = self.get_parameter('output_image_topic').value
@@ -65,6 +70,10 @@ class QRDetector(Node):
         self._log_jpeg_quality = int(self.get_parameter('log_jpeg_quality').value)
         self.log_limit_per_frame = max(0, int(self.get_parameter('log_limit_per_frame').value))
         self._log_filename_replace = str(self.get_parameter('log_filename_sanitize_replace').value)
+        self.log_odom_enable = bool(self.get_parameter('log_odom_enable').value)
+        self.odom_topic = str(self.get_parameter('odom_topic').value)
+        self.yaw_unit = self._normalize_yaw_unit(str(self.get_parameter('yaw_unit').value))
+        self._yaw_in_degrees = self.yaw_unit == 'deg'
 
         self.encode_format = encode_format
         self.jpeg_quality = jpeg_quality
@@ -82,6 +91,7 @@ class QRDetector(Node):
         self.log_session_dir = None
         self.log_csv_path = None
         self.seen_texts = set()
+        self.latest_odom: Optional[Dict[str, float]] = None
         if self.log_enable:
             self._setup_logging()
 
@@ -92,6 +102,16 @@ class QRDetector(Node):
         )
         self.pub_image = self.create_publisher(CompressedImage, output_topic, qos_profile)
         self.pub_text = self.create_publisher(String, text_topic, qos_profile)
+
+        if self.log_enable and self.log_odom_enable:
+            self.sub_odom = self.create_subscription(
+                Odometry,
+                self.odom_topic,
+                self.odom_callback,
+                QoSProfile(depth=10, reliability=QoSReliabilityPolicy.RELIABLE),
+            )
+        else:
+            self.sub_odom = None
 
         self.detector = cv2.QRCodeDetector()
 
@@ -207,6 +227,21 @@ class QRDetector(Node):
                 polys.append(pts)
         return results, polys
 
+    def odom_callback(self, msg: Odometry) -> None:
+        position = msg.pose.pose.position
+        orientation = msg.pose.pose.orientation
+        yaw_rad = math.atan2(
+            2.0 * (orientation.w * orientation.z + orientation.x * orientation.y),
+            1.0 - 2.0 * (orientation.y * orientation.y + orientation.z * orientation.z),
+        )
+        yaw = math.degrees(yaw_rad) if self._yaw_in_degrees else yaw_rad
+        self.latest_odom = {
+            'x': float(position.x),
+            'y': float(position.y),
+            'z': float(position.z),
+            'yaw': float(yaw),
+        }
+
     def _draw_annotations(
         self,
         image: np.ndarray,
@@ -279,7 +314,7 @@ class QRDetector(Node):
         try:
             with open(csv_path, "w", newline='', encoding='utf-8') as csv_file:
                 writer = csv.writer(csv_file)
-                writer.writerow(["timestamp", "text", "filename"])
+                writer.writerow(["timestamp", "text", "filename", "pos_x", "pos_y", "pos_z", "yaw"])
         except OSError as exc:
             self.get_logger().error(f"Failed to initialize log CSV '{csv_path}': {exc}")
             self.log_enable = False
@@ -312,7 +347,8 @@ class QRDetector(Node):
                 self.seen_texts.add(text)
                 continue
 
-            if not self._append_log_csv(self._current_timestamp(), text, filename):
+            odom = self.latest_odom if (self.log_odom_enable and self.latest_odom) else None
+            if not self._append_log_csv(self._current_timestamp(), text, filename, odom):
                 self.get_logger().warn(f"Failed to append log CSV for '{text}'")
 
             self.seen_texts.add(text)
@@ -341,13 +377,31 @@ class QRDetector(Node):
             self.get_logger().warn(f"cv2.imwrite returned False for '{path}'")
         return ok
 
-    def _append_log_csv(self, timestamp: str, text: str, filename: str) -> bool:
+    def _append_log_csv(
+        self,
+        timestamp: str,
+        text: str,
+        filename: str,
+        odom: Optional[Dict[str, float]],
+    ) -> bool:
         if not self.log_csv_path:
             return False
         try:
             with open(self.log_csv_path, "a", newline='', encoding='utf-8') as csv_file:
                 writer = csv.writer(csv_file)
-                writer.writerow([timestamp, text, filename])
+                if odom:
+                    row = [
+                        timestamp,
+                        text,
+                        filename,
+                        odom.get('x', ''),
+                        odom.get('y', ''),
+                        odom.get('z', ''),
+                        odom.get('yaw', ''),
+                    ]
+                else:
+                    row = [timestamp, text, filename, '', '', '', '']
+                writer.writerow(row)
             return True
         except OSError as exc:
             self.get_logger().warn(f"Failed to write to CSV '{self.log_csv_path}': {exc}")
@@ -365,6 +419,13 @@ class QRDetector(Node):
         if not name:
             name = 'qr'
         return name[:128]
+
+    @staticmethod
+    def _normalize_yaw_unit(value: str) -> str:
+        value = value.lower()
+        if value == 'rad':
+            return 'rad'
+        return 'deg'
 
     def _normalize_log_format(self, value: str) -> str:
         if value in {'png'}:

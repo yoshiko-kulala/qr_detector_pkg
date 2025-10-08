@@ -18,3 +18,6 @@ qr_detector:
     log_jpeg_quality: 95
     log_limit_per_frame: 1
     log_filename_sanitize_replace: "_"
+    log_odom_enable: true
+    odom_topic: "/NITRone/odom"
+    yaw_unit: "deg"
