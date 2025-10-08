@@ -33,6 +33,12 @@ bash ~/inSectWRS2025/script/10_ws_build.sh
 ros2 launch qr_detector_pkg qr_detector.launch.py
 ```
 
+ログ機能を有効化した状態で起動する場合は以下を使用してください。
+
+```bash
+ros2 launch qr_detector_pkg qr_detector_logging.launch.py
+```
+
 検出したQRコードの文字列は次のトピックで確認できます。
 
 ```bash
@@ -65,6 +71,12 @@ ros2 topic echo /qr/text
 | `max_fps` | int | `30` | 処理する最大フレームレート |
 | `skip_rate` | int | `1` | フレーム間引き率（`n`なら`n`フレームに1回処理） |
 | `qos_reliability` | string | `"best_effort"` | QoSの信頼性設定（`best_effort`/`reliable`など） |
+| `log_enable` | bool | `false` | QR検出結果をログ保存するか |
+| `log_root_dir` | string | `"~/qr_logs"` | ログ保存先のルートディレクトリ |
+| `log_image_format` | string | `"jpeg"` | 保存画像形式（`jpeg` または `png`） |
+| `log_jpeg_quality` | int | `95` | 保存画像の品質（`jpeg`は0〜100、`png`は圧縮率換算） |
+| `log_limit_per_frame` | int | `1` | 1フレームあたり保存する新規文字列の最大数 |
+| `log_filename_sanitize_replace` | string | `"_"` | ファイル名で使用不可文字を置換する文字 |
 
 ## ライセンス
 

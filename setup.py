@@ -9,7 +9,7 @@ setup(
     data_files=[
         ('share/ament_index/resource_index/packages', ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
-        ('share/' + package_name + '/launch', ['launch/qr_detector.launch.py']),
+        ('share/' + package_name + '/launch', ['launch/qr_detector.launch.py', 'launch/qr_detector_logging.launch.py']),
         ('share/' + package_name + '/config', ['config/params.yaml']),
     ],
     install_requires=['setuptools'],

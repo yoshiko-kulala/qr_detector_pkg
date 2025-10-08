@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import csv
+import datetime
+import os
 import time
 from typing import List, Sequence, Tuple
 
@@ -37,6 +40,12 @@ class QRDetector(Node):
         self.declare_parameter('max_fps', 30)
         self.declare_parameter('skip_rate', 1)
         self.declare_parameter('qos_reliability', 'best_effort')
+        self.declare_parameter('log_enable', False)
+        self.declare_parameter('log_root_dir', '~/qr_logs')
+        self.declare_parameter('log_image_format', 'jpeg')
+        self.declare_parameter('log_jpeg_quality', 95)
+        self.declare_parameter('log_limit_per_frame', 1)
+        self.declare_parameter('log_filename_sanitize_replace', '_')
 
         input_topic = self.get_parameter('input_image_topic').value
         output_topic = self.get_parameter('output_image_topic').value
@@ -50,6 +59,12 @@ class QRDetector(Node):
         max_fps = float(self.get_parameter('max_fps').value)
         skip_rate = max(1, int(self.get_parameter('skip_rate').value))
         reliability_param = str(self.get_parameter('qos_reliability').value).lower()
+        self.log_enable = bool(self.get_parameter('log_enable').value)
+        self._log_root_dir = str(self.get_parameter('log_root_dir').value)
+        self._log_image_format = str(self.get_parameter('log_image_format').value).lower()
+        self._log_jpeg_quality = int(self.get_parameter('log_jpeg_quality').value)
+        self.log_limit_per_frame = max(0, int(self.get_parameter('log_limit_per_frame').value))
+        self._log_filename_replace = str(self.get_parameter('log_filename_sanitize_replace').value)
 
         self.encode_format = encode_format
         self.jpeg_quality = jpeg_quality
@@ -59,6 +74,16 @@ class QRDetector(Node):
         self.last_processed_time = 0.0
         self.frame_counter = 0
         self._warned_pyzbar = False
+        self._log_image_format = self._normalize_log_format(self._log_image_format)
+        self._log_jpeg_quality = self._clamp_quality(self._log_jpeg_quality)
+        self._log_filename_replace = self._sanitize_replace_str(self._log_filename_replace)
+        self._log_extension = '.png' if self._log_image_format == 'png' else '.jpg'
+        self._log_imwrite_params = self._build_log_imwrite_params()
+        self.log_session_dir = None
+        self.log_csv_path = None
+        self.seen_texts = set()
+        if self.log_enable:
+            self._setup_logging()
 
         qos_profile = QoSProfile(depth=10, reliability=self._parse_reliability(reliability_param))
 
@@ -85,7 +110,7 @@ class QRDetector(Node):
         if image is None:
             self.get_logger().warn('Failed to decode incoming compressed image')
             return
-
+        raw_image = image.copy()
         decoded_texts: List[str] = []
         annotated = image.copy()
 
@@ -107,6 +132,7 @@ class QRDetector(Node):
                 annotated = self._draw_annotations(annotated, polygons, texts, angle, image.shape[:2])
 
         if decoded_texts:
+            self._save_qr_logs(raw_image, decoded_texts)
             text_msg = String()
             text_msg.data = '\n'.join(decoded_texts)
             self.pub_text.publish(text_msg)
@@ -237,6 +263,134 @@ class QRDetector(Node):
             'system_default': QoSReliabilityPolicy.SYSTEM_DEFAULT,
         }
         return mapping.get(value, QoSReliabilityPolicy.BEST_EFFORT)
+
+    def _setup_logging(self) -> None:
+        root_dir = os.path.expanduser(self._log_root_dir)
+        timestamp = datetime.datetime.now(datetime.timezone.utc).astimezone().strftime("%Y-%m-%d-%H-%M-%S")
+        session_dir = os.path.join(root_dir, timestamp)
+        try:
+            os.makedirs(session_dir, exist_ok=True)
+        except OSError as exc:
+            self.get_logger().error(f"Failed to create log directory '{session_dir}': {exc}")
+            self.log_enable = False
+            return
+
+        csv_path = os.path.join(session_dir, "qr-list.csv")
+        try:
+            with open(csv_path, "w", newline='', encoding='utf-8') as csv_file:
+                writer = csv.writer(csv_file)
+                writer.writerow(["timestamp", "text", "filename"])
+        except OSError as exc:
+            self.get_logger().error(f"Failed to initialize log CSV '{csv_path}': {exc}")
+            self.log_enable = False
+            return
+
+        self.log_session_dir = session_dir
+        self.log_csv_path = csv_path
+        self.get_logger().info(f"Logging detections to '{session_dir}'")
+
+    def _save_qr_logs(self, image: np.ndarray, texts: Sequence[str]) -> None:
+        if not self.log_enable or not self.log_session_dir or not texts:
+            return
+
+        if self.log_limit_per_frame == 0:
+            return
+
+        new_texts = [text for text in texts if text and text not in self.seen_texts]
+        if not new_texts:
+            return
+
+        limit = self.log_limit_per_frame
+        if limit > 0:
+            new_texts = new_texts[:limit]
+
+        for text in new_texts:
+            filename = self._build_log_filename(text)
+            file_path = os.path.join(self.log_session_dir, filename)
+            if not self._write_log_image(file_path, image):
+                self.get_logger().warn(f"Failed to save log image for '{text}'")
+                self.seen_texts.add(text)
+                continue
+
+            if not self._append_log_csv(self._current_timestamp(), text, filename):
+                self.get_logger().warn(f"Failed to append log CSV for '{text}'")
+
+            self.seen_texts.add(text)
+
+    def _build_log_filename(self, text: str) -> str:
+        if not self.log_session_dir:
+            return f"qr{self._log_extension}"
+
+        base = self._sanitize_filename(text)
+        candidate = base
+        counter = 1
+        path = os.path.join(self.log_session_dir, f"{candidate}{self._log_extension}")
+        while os.path.exists(path):
+            candidate = f"{base}{self._log_filename_replace}{counter}"
+            path = os.path.join(self.log_session_dir, f"{candidate}{self._log_extension}")
+            counter += 1
+        return f"{candidate}{self._log_extension}"
+
+    def _write_log_image(self, path: str, image: np.ndarray) -> bool:
+        try:
+            ok = cv2.imwrite(path, image, self._log_imwrite_params)
+        except cv2.error as exc:
+            self.get_logger().warn(f"cv2 error while saving '{path}': {exc}")
+            return False
+        if not ok:
+            self.get_logger().warn(f"cv2.imwrite returned False for '{path}'")
+        return ok
+
+    def _append_log_csv(self, timestamp: str, text: str, filename: str) -> bool:
+        if not self.log_csv_path:
+            return False
+        try:
+            with open(self.log_csv_path, "a", newline='', encoding='utf-8') as csv_file:
+                writer = csv.writer(csv_file)
+                writer.writerow([timestamp, text, filename])
+            return True
+        except OSError as exc:
+            self.get_logger().warn(f"Failed to write to CSV '{self.log_csv_path}': {exc}")
+            return False
+
+    def _sanitize_filename(self, value: str) -> str:
+        replace = self._log_filename_replace or '_'
+        safe_chars = []
+        for char in value:
+            if char.isalnum() or char in ('-', '_'):
+                safe_chars.append(char)
+            else:
+                safe_chars.append(replace)
+        name = ''.join(safe_chars).strip().lstrip('.')
+        if not name:
+            name = 'qr'
+        return name[:128]
+
+    def _normalize_log_format(self, value: str) -> str:
+        if value in {'png'}:
+            return 'png'
+        return 'jpeg'
+
+    @staticmethod
+    def _clamp_quality(value: int) -> int:
+        return max(0, min(100, int(value)))
+
+    def _build_log_imwrite_params(self) -> List[int]:
+        if self._log_image_format == 'png':
+            compression = max(0, min(9, int((100 - self._log_jpeg_quality) / 10)))
+            return [int(cv2.IMWRITE_PNG_COMPRESSION), compression]
+        return [int(cv2.IMWRITE_JPEG_QUALITY), self._log_jpeg_quality]
+
+    def _sanitize_replace_str(self, replace: str) -> str:
+        if not replace:
+            return '_'
+        if any(sep in replace for sep in ('/', '\\')):
+            return '_'
+        return replace
+
+    @staticmethod
+    def _current_timestamp() -> str:
+        return datetime.datetime.now(datetime.timezone.utc).astimezone().isoformat()
 
 
 def main(args=None) -> None:  # pragma: no cover - ROS 2 entry point
