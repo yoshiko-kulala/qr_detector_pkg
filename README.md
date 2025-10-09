@@ -1,6 +1,6 @@
 # qr_detector_pkg
 
-ROS 2 Humble用のQRコード検出パッケージです。`sensor_msgs/msg/CompressedImage` を購読し、QRコード文字列を `std_msgs/msg/String` で配信しつつ、枠と文字を描画した `sensor_msgs/msg/CompressedImage` と `sensor_msgs/msg/Image`（非圧縮）を配信します。非圧縮画像は既定で約50%に縮小して配信するため、遅延を抑えやすくなっています。
+ROS 2 Humble用のQRコード検出パッケージです。`sensor_msgs/msg/CompressedImage` を購読し、QRコード文字列を `std_msgs/msg/String` で配信しつつ、枠と文字を描画した `sensor_msgs/msg/CompressedImage` と `sensor_msgs/msg/Image`（非圧縮）を配信します。非圧縮画像は既定で約50%に縮小して配信するため、遅延を抑えやすくなっています。注釈画像の左上には、これまでに保存した（ログ無効時は検出した）ユニークなQRコードの枚数が表示されます。
 
 ## 依存パッケージのインストール
 

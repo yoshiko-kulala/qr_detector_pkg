@@ -5,7 +5,7 @@ import datetime
 import math
 import os
 import time
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 import cv2
 import numpy as np
@@ -97,7 +97,9 @@ class QRDetector(Node):
         self._log_imwrite_params = self._build_log_imwrite_params()
         self.log_session_dir = None
         self.log_csv_path = None
-        self.seen_texts = set()
+        self.seen_texts: Set[str] = set()
+        self.detected_texts: Set[str] = set()
+        self.saved_image_count: int = 0
         self.latest_odom: Optional[Dict[str, float]] = None
         if self.log_enable:
             self._setup_logging()
@@ -164,10 +166,16 @@ class QRDetector(Node):
                 annotated = self._draw_annotations(annotated, polygons, texts, angle, image.shape[:2])
 
         if decoded_texts:
+            for text in decoded_texts:
+                if text:
+                    self.detected_texts.add(text)
             self._save_qr_logs(raw_image, decoded_texts)
             text_msg = String()
             text_msg.data = '\n'.join(decoded_texts)
             self.pub_text.publish(text_msg)
+
+        display_count = self.saved_image_count if self.log_enable else len(self.detected_texts)
+        annotated = self._draw_detection_count(annotated, display_count)
 
         success, buffer, fmt = encode_image(annotated, self.encode_format, self.jpeg_quality)
         if not success:
@@ -290,6 +298,31 @@ class QRDetector(Node):
                 )
         return annotated
 
+    def _draw_detection_count(self, image: np.ndarray, count: int) -> np.ndarray:
+        text = str(count)
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 0.9
+        thickness = 2
+        margin = 12
+        (text_width, text_height), baseline = cv2.getTextSize(text, font, font_scale, thickness)
+        baseline = max(baseline, 2)
+        x0 = margin
+        y0 = margin + text_height
+        top_left = (x0 - 6, y0 - text_height - baseline - 6)
+        bottom_right = (x0 + text_width + 6, y0 + baseline + 6)
+        cv2.rectangle(image, top_left, bottom_right, (0, 0, 0), -1)
+        cv2.putText(
+            image,
+            text,
+            (x0, y0),
+            font,
+            font_scale,
+            (255, 255, 255),
+            thickness,
+            cv2.LINE_AA,
+        )
+        return image
+
     @staticmethod
     def _sanitize_angles(raw_angles: Sequence[int]) -> List[int]:
         angles: List[int] = []
@@ -367,6 +400,7 @@ class QRDetector(Node):
             if not self._append_log_csv(self._current_timestamp(), text, filename, odom):
                 self.get_logger().warn(f"Failed to append log CSV for '{text}'")
 
+            self.saved_image_count += 1
             self.seen_texts.add(text)
 
     def _build_log_filename(self, text: str) -> str:
