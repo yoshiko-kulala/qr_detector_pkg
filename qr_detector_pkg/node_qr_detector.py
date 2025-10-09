@@ -12,7 +12,7 @@ import numpy as np
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy
-from sensor_msgs.msg import CompressedImage
+from sensor_msgs.msg import CompressedImage, Image
 from std_msgs.msg import String
 from nav_msgs.msg import Odometry
 
@@ -32,6 +32,7 @@ class QRDetector(Node):
 
         self.declare_parameter('input_image_topic', '/image_in/compressed')
         self.declare_parameter('output_image_topic', '/image_out/compressed')
+        self.declare_parameter('output_image_raw_topic', '/image_out')
         self.declare_parameter('text_topic', '/qr/text')
         self.declare_parameter('encode_format', 'jpeg')
         self.declare_parameter('jpeg_quality', 90)
@@ -51,9 +52,12 @@ class QRDetector(Node):
         self.declare_parameter('log_odom_enable', True)
         self.declare_parameter('odom_topic', '/NITRone/odom')
         self.declare_parameter('yaw_unit', 'deg')
+        self.declare_parameter('publish_raw_image', True)
+        self.declare_parameter('output_image_raw_scale', 0.5)
 
         input_topic = self.get_parameter('input_image_topic').value
         output_topic = self.get_parameter('output_image_topic').value
+        output_raw_topic = self.get_parameter('output_image_raw_topic').value
         text_topic = self.get_parameter('text_topic').value
         encode_format = self.get_parameter('encode_format').value
         jpeg_quality = int(self.get_parameter('jpeg_quality').value)
@@ -74,6 +78,9 @@ class QRDetector(Node):
         self.odom_topic = str(self.get_parameter('odom_topic').value)
         self.yaw_unit = self._normalize_yaw_unit(str(self.get_parameter('yaw_unit').value))
         self._yaw_in_degrees = self.yaw_unit == 'deg'
+        self.publish_raw_image = bool(self.get_parameter('publish_raw_image').value)
+        self.output_image_raw_topic = str(output_raw_topic)
+        self.output_image_raw_scale = self._sanitize_raw_scale(self.get_parameter('output_image_raw_scale').value)
 
         self.encode_format = encode_format
         self.jpeg_quality = jpeg_quality
@@ -95,13 +102,18 @@ class QRDetector(Node):
         if self.log_enable:
             self._setup_logging()
 
-        qos_profile = QoSProfile(depth=10, reliability=self._parse_reliability(reliability_param))
+        reliability = self._parse_reliability(reliability_param)
+        qos_profile = QoSProfile(depth=10, reliability=reliability)
 
         self.sub_image = self.create_subscription(
             CompressedImage, input_topic, self.image_callback, qos_profile
         )
         self.pub_image = self.create_publisher(CompressedImage, output_topic, qos_profile)
         self.pub_text = self.create_publisher(String, text_topic, qos_profile)
+        self.pub_image_raw = None
+        if self.publish_raw_image:
+            raw_qos_profile = QoSProfile(depth=1, reliability=reliability)
+            self.pub_image_raw = self.create_publisher(Image, self.output_image_raw_topic, raw_qos_profile)
 
         if self.log_enable and self.log_odom_enable:
             self.sub_odom = self.create_subscription(
@@ -167,6 +179,10 @@ class QRDetector(Node):
         out_msg.format = fmt
         out_msg.data = buffer.tobytes()
         self.pub_image.publish(out_msg)
+        if self.pub_image_raw is not None:
+            raw_msg = self._build_raw_image_msg(annotated, msg.header)
+            if raw_msg is not None:
+                self.pub_image_raw.publish(raw_msg)
 
     def _detect_with_opencv(self, image: np.ndarray) -> Tuple[List[str], List[np.ndarray]]:
         texts: List[str] = []
@@ -452,6 +468,62 @@ class QRDetector(Node):
     @staticmethod
     def _current_timestamp() -> str:
         return datetime.datetime.now(datetime.timezone.utc).astimezone().isoformat()
+
+    def _build_raw_image_msg(self, image: np.ndarray, header) -> Optional[Image]:
+        if image is None:
+            return None
+        prepared = self._prepare_raw_image(image)
+        if prepared is None:
+            return None
+        contiguous = np.ascontiguousarray(prepared)
+        if contiguous.ndim == 2:
+            encoding = 'mono8'
+            height, width = contiguous.shape
+            channels = 1
+        elif contiguous.ndim == 3 and contiguous.shape[2] in (3, 4):
+            channels = contiguous.shape[2]
+            encoding = 'bgr8' if channels == 3 else 'bgra8'
+            height, width = contiguous.shape[:2]
+        else:
+            self.get_logger().warn('Unsupported image shape for raw publishing')
+            return None
+
+        msg = Image()
+        msg.header = header
+        msg.height = height
+        msg.width = width
+        msg.encoding = encoding
+        msg.is_bigendian = 0
+        msg.step = width * channels
+        msg.data = contiguous.tobytes()
+        return msg
+
+    def _prepare_raw_image(self, image: np.ndarray) -> Optional[np.ndarray]:
+        scale = self.output_image_raw_scale
+        if image.ndim not in (2, 3):
+            self.get_logger().warn('Unsupported annotated image dimensionality for raw publishing')
+            return None
+        if scale == 1.0:
+            return image
+        try:
+            h, w = image.shape[:2]
+            new_w = max(1, int(round(w * scale)))
+            new_h = max(1, int(round(h * scale)))
+            interpolation = cv2.INTER_AREA if scale < 1.0 else cv2.INTER_LINEAR
+            return cv2.resize(image, (new_w, new_h), interpolation=interpolation)
+        except (cv2.error, OverflowError, ValueError) as exc:
+            self.get_logger().warn(f'Failed to resize raw image: {exc}')
+            return None
+
+    @staticmethod
+    def _sanitize_raw_scale(value: float) -> float:
+        try:
+            scale = float(value)
+        except (TypeError, ValueError):
+            return 1.0
+        if scale <= 0.0:
+            return 1.0
+        return float(scale)
 
 
 def main(args=None) -> None:  # pragma: no cover - ROS 2 entry point

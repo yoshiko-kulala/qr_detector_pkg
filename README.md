@@ -1,6 +1,6 @@
 # qr_detector_pkg
 
-ROS 2 Humble用のQRコード検出パッケージです。`sensor_msgs/msg/CompressedImage` を購読し、QRコード文字列を `std_msgs/msg/String` で配信しつつ、枠と文字を描画した `sensor_msgs/msg/CompressedImage` を配信します。
+ROS 2 Humble用のQRコード検出パッケージです。`sensor_msgs/msg/CompressedImage` を購読し、QRコード文字列を `std_msgs/msg/String` で配信しつつ、枠と文字を描画した `sensor_msgs/msg/CompressedImage` と `sensor_msgs/msg/Image`（非圧縮）を配信します。非圧縮画像は既定で約50%に縮小して配信するため、遅延を抑えやすくなっています。
 
 ## 依存パッケージのインストール
 
@@ -52,6 +52,7 @@ ros2 topic echo /qr/text
 | 入力 | `/image_in/compressed` | `sensor_msgs/msg/CompressedImage` | 入力圧縮画像 |
 | 出力 | `/qr/text` | `std_msgs/msg/String` | 認識文字列（複数は改行区切り） |
 | 出力 | `/image_out/compressed` | `sensor_msgs/msg/CompressedImage` | 枠と文字を描画した圧縮画像 |
+| 出力 | `/image_out` | `sensor_msgs/msg/Image` | 枠と文字を描画した非圧縮画像 |
 
 ## パラメータ
 
@@ -62,6 +63,7 @@ ros2 topic echo /qr/text
 | `input_image_topic` | string | `/image_in/compressed` | 入力画像トピック |
 | `output_image_topic` | string | `/image_out/compressed` | 出力画像トピック |
 | `text_topic` | string | `/qr/text` | 認識文字列トピック |
+| `output_image_raw_topic` | string | `/image_out` | 非圧縮画像トピック |
 | `encode_format` | string | `"jpeg"` | 出力画像圧縮フォーマット |
 | `jpeg_quality` | int | `90` | JPEGエンコード品質 |
 | `rotate_attempts` | list[int] | `[0, 90, 180, 270]` | 画像を回転して検出を試みる角度 |
@@ -77,6 +79,8 @@ ros2 topic echo /qr/text
 | `log_jpeg_quality` | int | `95` | 保存画像の品質（`jpeg`は0〜100、`png`は圧縮率換算） |
 | `log_limit_per_frame` | int | `1` | 1フレームあたり保存する新規文字列の最大数 |
 | `log_filename_sanitize_replace` | string | `"_"` | ファイル名で使用不可文字を置換する文字 |
+| `publish_raw_image` | bool | `true` | 非圧縮画像の配信を有効化するか |
+| `output_image_raw_scale` | double | `0.5` | 非圧縮画像トピックの縮小率（1.0で等倍） |
 
 ## ライセンス
 
