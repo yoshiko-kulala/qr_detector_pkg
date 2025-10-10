@@ -100,6 +100,7 @@ class QRDetector(Node):
         self.seen_texts: Set[str] = set()
         self.detected_texts: Set[str] = set()
         self.saved_image_count: int = 0
+        self.last_detected_text: str = ''
         self.latest_odom: Optional[Dict[str, float]] = None
         if self.log_enable:
             self._setup_logging()
@@ -170,14 +171,18 @@ class QRDetector(Node):
                 if text:
                     self.detected_texts.add(text)
             self._save_qr_logs(raw_image, decoded_texts)
+            for candidate in reversed(decoded_texts):
+                if candidate:
+                    self.last_detected_text = candidate
+                    break
             text_msg = String()
             text_msg.data = '\n'.join(decoded_texts)
             self.pub_text.publish(text_msg)
 
         display_count = self.saved_image_count if self.log_enable else len(self.detected_texts)
-        annotated = self._draw_detection_count(annotated, display_count)
+        annotated_with_overlay = self._draw_detection_overlay(annotated.copy(), display_count, self.last_detected_text)
 
-        success, buffer, fmt = encode_image(annotated, self.encode_format, self.jpeg_quality)
+        success, buffer, fmt = encode_image(annotated_with_overlay, self.encode_format, self.jpeg_quality)
         if not success:
             self.get_logger().warn('Failed to encode annotated image')
             return
@@ -188,7 +193,7 @@ class QRDetector(Node):
         out_msg.data = buffer.tobytes()
         self.pub_image.publish(out_msg)
         if self.pub_image_raw is not None:
-            raw_msg = self._build_raw_image_msg(annotated, msg.header)
+            raw_msg = self._build_raw_image_msg(annotated, msg.header, display_count)
             if raw_msg is not None:
                 self.pub_image_raw.publish(raw_msg)
 
@@ -298,29 +303,44 @@ class QRDetector(Node):
                 )
         return annotated
 
-    def _draw_detection_count(self, image: np.ndarray, count: int) -> np.ndarray:
-        text = str(count)
+    def _draw_detection_overlay(self, image: np.ndarray, count: int, last_text: str) -> np.ndarray:
+        lines = [str(count)]
+        if last_text:
+            lines.append(last_text)
         font = cv2.FONT_HERSHEY_SIMPLEX
         font_scale = 0.9
         thickness = 2
         margin = 12
-        (text_width, text_height), baseline = cv2.getTextSize(text, font, font_scale, thickness)
-        baseline = max(baseline, 2)
-        x0 = margin
-        y0 = margin + text_height
-        top_left = (x0 - 6, y0 - text_height - baseline - 6)
-        bottom_right = (x0 + text_width + 6, y0 + baseline + 6)
-        cv2.rectangle(image, top_left, bottom_right, (0, 0, 0), -1)
-        cv2.putText(
-            image,
-            text,
-            (x0, y0),
-            font,
-            font_scale,
-            (255, 255, 255),
-            thickness,
-            cv2.LINE_AA,
-        )
+        padding = 6
+        line_gap = 6 if len(lines) > 1 else 0
+
+        sizes = [cv2.getTextSize(line, font, font_scale, thickness) for line in lines]
+        text_dims = [size[0] for size in sizes]
+        baselines = [max(size[1], 2) for size in sizes]
+
+        max_width = max((dim[0] for dim in text_dims), default=0)
+        total_height = sum(dim[1] for dim in text_dims) + line_gap * max(len(lines) - 1, 0)
+        max_baseline = max(baselines, default=2)
+
+        rect_top_left = (margin - padding, margin - padding)
+        rect_bottom_right = (margin + max_width + padding, margin + total_height + max_baseline + padding)
+        cv2.rectangle(image, rect_top_left, rect_bottom_right, (0, 0, 0), -1)
+
+        y = margin
+        for idx, line in enumerate(lines):
+            y += text_dims[idx][1]
+            cv2.putText(
+                image,
+                line,
+                (margin, y),
+                font,
+                font_scale,
+                (255, 255, 255),
+                thickness,
+                cv2.LINE_AA,
+            )
+            if idx + 1 < len(lines):
+                y += line_gap
         return image
 
     @staticmethod
@@ -503,12 +523,13 @@ class QRDetector(Node):
     def _current_timestamp() -> str:
         return datetime.datetime.now(datetime.timezone.utc).astimezone().isoformat()
 
-    def _build_raw_image_msg(self, image: np.ndarray, header) -> Optional[Image]:
+    def _build_raw_image_msg(self, image: np.ndarray, header, detection_count: int) -> Optional[Image]:
         if image is None:
             return None
         prepared = self._prepare_raw_image(image)
         if prepared is None:
             return None
+        prepared = self._draw_detection_overlay(prepared, detection_count, self.last_detected_text)
         contiguous = np.ascontiguousarray(prepared)
         if contiguous.ndim == 2:
             encoding = 'mono8'
