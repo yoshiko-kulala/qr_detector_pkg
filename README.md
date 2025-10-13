@@ -17,14 +17,6 @@ Pythonパッケージとして `opencv-python` や `pyzbar` のホイールを�
 python3 -m pip install --user opencv-python pyzbar numpy
 ```
 
-## ビルド方法
-
-ワークスペースルートで、必ず次のスクリプトでビルドしてください。
-
-```bash
-bash ~/inSectWRS2025/script/10_ws_build.sh
-```
-
 ## ノードの起動
 
 ビルド後、以下のコマンドでノードを起動できます。
